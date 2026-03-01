@@ -1,70 +1,132 @@
-# Getting Started with Create React App
+# NewsLensAI MVP - React Frontend
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+This is the React-based MVP frontend for NewsLensAI, a RAG-powered India & Global News Intelligence Platform.
 
-## Available Scripts
+## 🎯 MVP Features
 
-In the project directory, you can run:
+- **💬 Conversational AI Chat**: Multi-turn dialogue with RAG-backed, citation-verified responses
+- **📰 News Display**: Browse latest India & Global news with topics and regions
+- **📊 Sentiment Dashboard**: Real-time sentiment analysis (Phase 2 - coming soon)
+- **🔄 Session Management**: Persistent conversation sessions
+- **🌐 Google Cloud Integration**: Built for GCP Free Tier
 
-### `npm start`
+## 🚀 Quick Start
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+### Prerequisites
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+- Node.js 14+ and npm
+- Google Cloud Account (free tier eligible)
+- Python 3.8+ (for backend development)
 
-### `npm test`
+### 1. Clone & Setup
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+```bash
+# Navigate to client directory
+cd client
 
-### `npm run build`
+# Install dependencies
+npm install
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+# Copy environment file
+cp .env.example .env
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+# Edit .env with your Google Cloud project details
+```
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+### 2. Local Development
 
-### `npm run eject`
+```bash
+# Start the React development server
+npm start
+# App opens at http://localhost:3000
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+### 3. Build for Production
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+```bash
+npm run build
+# Build output in ./build directory
+```
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+## 📁 Project Structure
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+```
+client/
+├── src/
+│   ├── components/           # React UI components
+│   │   ├── ChatInterface.js
+│   │   ├── NewsDisplay.js
+│   │   └── SentimentDashboard.js
+│   ├── services/
+│   │   └── api.js            # Backend API client
+│   ├── config/
+│   │   └── gcp.js            # Google Cloud configuration
+│   ├── styles/
+│   │   ├── ChatInterface.css
+│   │   ├── NewsDisplay.css
+│   │   └── SentimentDashboard.css
+│   ├── App.js
+│   └── App.css
+├── .env.example
+└── package.json
+```
 
-## Learn More
+## 🌍 Environment Variables
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+```env
+REACT_APP_GCP_PROJECT_ID=newslensai-dev
+REACT_APP_GCP_REGION=asia-south1
+REACT_APP_ENV=development
+REACT_APP_API_URL=http://localhost:8000
+```
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+## 📊 Available Scripts
 
-### Code Splitting
+```bash
+npm start      # Start development server
+npm test       # Run tests
+npm run build  # Create production build
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+## ☁️ Google Cloud Deployment
 
-### Analyzing the Bundle Size
+See `src/config/gcp.js` for detailed GCP deployment guide.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+Key GCP free tier services:
+- **Cloud Run**: 180,000 vCPU-seconds/month
+- **Cloud SQL**: 1 shared-core instance, 10GB storage
+- **Vertex AI**: $300 free credits
+- **Cloud Storage**: 5GB/month egress
+- **Total Cost**: $0/month during development
 
-### Making a Progressive Web App
+## 🔌 API Integration
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+The frontend connects to FastAPI backend:
 
-### Advanced Configuration
+```bash
+POST /api/chat          # Send chat message
+GET  /api/news?...      # Fetch news
+GET  /api/sentiment?... # Get sentiment data
+GET  /health            # Health check
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+## 📚 Learning Resources
 
-### Deployment
+- [React Docs](https://react.dev)
+- [Google Cloud Platform](https://cloud.google.com)
+- [Vertex AI Docs](https://cloud.google.com/vertex-ai/docs)
+- [Cloud SQL Docs](https://cloud.google.com/sql/docs)
+- [Cloud Run Docs](https://cloud.google.com/run/docs)
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+## 🗺️ Phase Roadmap
 
-### `npm run build` fails to minify
+- **MVP Phase 1** (Current): Chat, News, Sessions
+- **Phase 2** (Q2-Q3 2026): Sentiment Analytics
+- **Phase 3** (Q3-Q4 2026): WhatsApp Bot, Election Tracker
+- **Phase 4** (2027): Advanced Analytics, Predictions
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+## 📄 License
+
+Proprietary - NewsLensAI MVP
+
+**Version**: 1.0 | **Status**: MVP Development
