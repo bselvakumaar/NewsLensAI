@@ -15,10 +15,10 @@ When you push code to `master`, GitHub Actions starts automatically.
   - Builds React app (`npm ci`, `npm run build`)
   - Uploads `build/` to Cloud Storage bucket via `gsutil rsync`
 - `deploy-backend` job:
-  - Runs only if `backend/Dockerfile` exists in the same GitHub repo
+  - Runs when `backend/Dockerfile` exists in the same GitHub repo
   - Deploys backend source to Cloud Run with `gcloud run deploy --source ./backend`
-
-Important: your current GitHub repo (connected from local `client/`) does not include a `backend/` directory yet, so backend job is skipped for now.
+  
+Current status in this repo: `backend/` is included, so backend deployment is active in CI/CD.
 
 ## 3. Required GitHub Secrets
 Create these in GitHub:
@@ -110,4 +110,3 @@ gcloud run deploy newslensai-backend --source d:\\Training\\working\\NewsLesAI\\
 ## 8. Security note
 - `GCP_SA_KEY` is sensitive. Never commit JSON key files.
 - Long-term best practice: move to Workload Identity Federation (keyless auth).
-

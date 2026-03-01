@@ -21,3 +21,10 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# backend (monorepo layout for CI/CD)
+backend/.env
+backend/venv/
+backend/__pycache__/
+backend/.pytest_cache/
+backend/.mypy_cache/
