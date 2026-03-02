@@ -9,14 +9,15 @@ Endpoints:
 - GET /health - Health check
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 import os
 import logging
 from datetime import datetime
 import uuid
+import asyncio
 
 # News sources
 from news_sources import (
@@ -28,6 +29,13 @@ from news_sources import (
 
 # RAG pipeline
 from rag import rag_pipeline
+from article_store import (
+    get_ingestion_snapshot,
+    ingest_from_web,
+    is_cache_stale,
+    normalize_topic,
+    query_articles,
+)
 
 # Admin API
 from admin_api import (
@@ -43,6 +51,22 @@ from admin_api import (
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+SCHEDULER_INGEST_TOKEN = os.getenv("SCHEDULER_INGEST_TOKEN", "")
+INGESTION_RUNTIME_SETTINGS = {
+    "external_ingestion_enabled": os.getenv("EXTERNAL_INGESTION_ENABLED", "true").lower() == "true",
+    "auto_ingestion_enabled": os.getenv("AUTO_INGEST_ENABLED", "true").lower() == "true",
+}
+
+
+def _assert_scheduler_token(request: Request):
+    """Validate scheduler bearer token when configured."""
+    if not SCHEDULER_INGEST_TOKEN:
+        return
+    auth = request.headers.get("authorization", "")
+    expected = f"Bearer {SCHEDULER_INGEST_TOKEN}"
+    if auth != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized scheduler token")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -65,11 +89,16 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     session_id: str
     query: str
+    topic: Optional[str] = None
+    region: Optional[str] = "India"
 
 class ChatResponse(BaseModel):
-    answer: str
+    summary: str
+    answer: Optional[str] = None
     sources: List[dict] = []
-    region: str = "Global"
+    region: str = "India"
+    confidence: str = "Low"
+    last_updated: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 class Article(BaseModel):
     id: int
@@ -103,6 +132,13 @@ class UpdateSourceRequest(BaseModel):
 
 class IngestionRequest(BaseModel):
     source_id: Optional[str] = None  # If None, ingest from all active sources
+    regions: Optional[List[str]] = None
+    topics: Optional[List[str]] = None
+    limit_per_fetch: int = 12
+
+class IngestionSettingsUpdate(BaseModel):
+    external_ingestion_enabled: Optional[bool] = None
+    auto_ingestion_enabled: Optional[bool] = None
 
 # ==================== Routes ====================
 
@@ -136,22 +172,52 @@ async def chat(request: ChatRequest):
         ChatResponse with answer and sources
     """
     try:
-        logger.info(f"Chat request - Session: {request.session_id}, Query: {request.query}")
+        logger.info(
+            f"Chat request - Session: {request.session_id}, Query: {request.query}, "
+            f"Region: {request.region}, Topic: {request.topic}"
+        )
         
-        # Fetch available articles from news sources
-        # In production, these would come from Cloud SQL
-        available_articles = []
-        
-        try:
-            # Try RSS first (fastest)
-            available_articles = await fetch_from_rss(region="India", limit=20)
-            if not available_articles:
-                # Fallback to test data
-                available_articles = get_test_articles(region="India", limit=20)
-        except Exception as e:
-            logger.warning(f"Failed to fetch articles: {str(e)}")
-            # Use test data as fallback
-            available_articles = get_test_articles(region="India", limit=20)
+        # Fetch available articles from live ingestion cache first.
+        region = request.region or "India"
+        normalized_topic = normalize_topic(request.topic)
+        available_articles = query_articles(
+            region=region,
+            topic=normalized_topic,
+            limit=80,
+            query=request.query,
+        )
+
+        # If cache is empty/stale, refresh from web and retry.
+        if not available_articles or is_cache_stale(max_age_minutes=15):
+            await ingest_from_web()
+            available_articles = query_articles(
+                region=region,
+                topic=normalized_topic,
+                limit=80,
+                query=request.query,
+            )
+
+        # Last fallback: direct fetch + test data.
+        if not available_articles:
+            try:
+                available_articles = await fetch_from_rss(
+                    region=region,
+                    topic=normalized_topic,
+                    limit=20
+                )
+                if not available_articles:
+                    available_articles = get_test_articles(
+                        region=region,
+                        topic=normalized_topic,
+                        limit=20
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to fetch direct fallback articles: {str(e)}")
+                available_articles = get_test_articles(
+                    region=region,
+                    topic=normalized_topic,
+                    limit=20
+                )
         
         logger.info(f"Articles available for RAG: {len(available_articles)}")
         
@@ -159,7 +225,7 @@ async def chat(request: ChatRequest):
         rag_response = await rag_pipeline(
             query=request.query,
             available_articles=available_articles,
-            region="India"
+            region=region
         )
         
         # Extract sources for response
@@ -173,19 +239,28 @@ async def chat(request: ChatRequest):
                     "url": source.get("url", ""),
                 })
         
+        summary = rag_response.get('summary') or rag_response.get('answer') or "Unable to process your query"
+        last_updated = rag_response.get('last_updated', datetime.utcnow().isoformat())
+
         return ChatResponse(
-            answer=rag_response.get('answer', "Unable to process your query"),
+            summary=summary,
+            answer=summary,
             sources=sources,
-            region=rag_response.get('region', 'India')
+            region=rag_response.get('region', 'India'),
+            confidence=rag_response.get('confidence', 'Low'),
+            last_updated=last_updated
         )
         
     except Exception as e:
         logger.error(f"Chat error: {str(e)}", exc_info=True)
         # Fallback response
         return ChatResponse(
+            summary=f"I encountered an error: {str(e)}. Please try again.",
             answer=f"I encountered an error: {str(e)}. Please try again.",
             sources=[],
-            region="India"
+            region="India",
+            confidence="Low",
+            last_updated=datetime.utcnow().isoformat()
         )
 
 @app.get("/api/news")
@@ -210,6 +285,42 @@ async def get_news(
     """
     try:
         logger.info(f"News request - Region: {region}, Topic: {topic}, Source: {source}, Limit: {limit}")
+        normalized_topic = normalize_topic(topic)
+
+        cached_articles = query_articles(
+            region=region,
+            topic=normalized_topic,
+            limit=limit,
+        )
+        if cached_articles:
+            return {
+                "articles": cached_articles,
+                "total": len(cached_articles),
+                "limit": limit,
+                "region": region,
+                "topic": normalized_topic or "All",
+                "source_used": "live_cache",
+                "message": "Fetched from auto-ingested web cache",
+                "ingestion": get_ingestion_snapshot(),
+            }
+
+        await ingest_from_web()
+        cached_articles = query_articles(
+            region=region,
+            topic=normalized_topic,
+            limit=limit,
+        )
+        if cached_articles:
+            return {
+                "articles": cached_articles,
+                "total": len(cached_articles),
+                "limit": limit,
+                "region": region,
+                "topic": normalized_topic or "All",
+                "source_used": "live_cache_after_refresh",
+                "message": "Fetched after on-demand web ingestion",
+                "ingestion": get_ingestion_snapshot(),
+            }
         
         articles = []
         sources_tried = []
@@ -225,19 +336,19 @@ async def get_news(
         for news_source in source_priority:
             try:
                 if news_source.lower() == "newsapi":
-                    articles = await fetch_from_newsapi(region, topic, limit)
+                    articles = await fetch_from_newsapi(region, normalized_topic, limit)
                     sources_tried.append("NewsAPI.org")
                     
                 elif news_source.lower() == "guardian":
-                    articles = await fetch_from_guardian(region, topic, limit)
+                    articles = await fetch_from_guardian(region, normalized_topic, limit)
                     sources_tried.append("The Guardian")
                     
                 elif news_source.lower() == "rss":
-                    articles = await fetch_from_rss(region, topic, limit)
+                    articles = await fetch_from_rss(region, normalized_topic, limit)
                     sources_tried.append("RSS Feeds")
                     
                 elif news_source.lower() == "test":
-                    articles = get_test_articles(region, topic, limit)
+                    articles = get_test_articles(region, normalized_topic, limit)
                     sources_tried.append("Test Data")
                 
                 # If we got articles, return them
@@ -248,7 +359,7 @@ async def get_news(
                         "total": len(articles),
                         "limit": limit,
                         "region": region,
-                        "topic": topic or "All",
+                        "topic": normalized_topic or "All",
                         "sources_tried": sources_tried,
                         "source_used": news_source,
                         "message": f"Fetched from {news_source}" + (f" (fallback from {', '.join(sources_tried[:-1])})" if len(sources_tried) > 1 else "")
@@ -261,14 +372,14 @@ async def get_news(
         
         # Fallback: return test data if all sources fail
         logger.warning(f"All sources failed. Using test data.")
-        articles = get_test_articles(region, topic, limit)
+        articles = get_test_articles(region, normalized_topic, limit)
         
         return {
             "articles": articles,
             "total": len(articles),
             "limit": limit,
             "region": region,
-            "topic": topic or "All",
+            "topic": normalized_topic or "All",
             "sources_tried": sources_tried,
             "source_used": "test (fallback)",
             "message": "All external sources failed. Returning test data.",
@@ -279,7 +390,7 @@ async def get_news(
         logger.error(f"News API error: {str(e)}", exc_info=True)
         # Even on error, try to return test data
         try:
-            articles = get_test_articles(region, topic, limit)
+            articles = get_test_articles(region, normalized_topic, limit)
             return {
                 "articles": articles,
                 "error": str(e),
@@ -399,11 +510,69 @@ async def admin_start_ingest(request: IngestionRequest):
     """Start ingestion from specific or all sources"""
     try:
         logger.info(f"Starting ingestion - Source: {request.source_id or 'all'}")
-        result = await start_ingestion(source_id=request.source_id)
-        return result
+        legacy_result = await start_ingestion(source_id=request.source_id)
+        live_result = await ingest_from_web(
+            regions=request.regions,
+            topics=[normalize_topic(t) for t in request.topics] if request.topics else None,
+            limit_per_fetch=request.limit_per_fetch,
+        )
+        return {
+            "status": "success",
+            "legacy": legacy_result,
+            "live_ingestion": live_result,
+        }
     except Exception as e:
         logger.error(f"Error starting ingestion: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/admin/ingest-settings")
+async def admin_get_ingest_settings():
+    """Get runtime ingestion control flags."""
+    return {
+        "external_ingestion_enabled": INGESTION_RUNTIME_SETTINGS["external_ingestion_enabled"],
+        "auto_ingestion_enabled": INGESTION_RUNTIME_SETTINGS["auto_ingestion_enabled"],
+        "scheduler_token_configured": bool(SCHEDULER_INGEST_TOKEN),
+    }
+
+@app.put("/api/admin/ingest-settings")
+async def admin_update_ingest_settings(payload: IngestionSettingsUpdate):
+    """Update runtime ingestion control flags without redeploy."""
+    if payload.external_ingestion_enabled is not None:
+        INGESTION_RUNTIME_SETTINGS["external_ingestion_enabled"] = payload.external_ingestion_enabled
+    if payload.auto_ingestion_enabled is not None:
+        INGESTION_RUNTIME_SETTINGS["auto_ingestion_enabled"] = payload.auto_ingestion_enabled
+
+    return {
+        "status": "success",
+        "settings": {
+            "external_ingestion_enabled": INGESTION_RUNTIME_SETTINGS["external_ingestion_enabled"],
+            "auto_ingestion_enabled": INGESTION_RUNTIME_SETTINGS["auto_ingestion_enabled"],
+        }
+    }
+
+@app.post("/api/admin/ingest/scheduler-trigger")
+async def scheduler_ingest_trigger(request: Request):
+    """Cloud Scheduler endpoint for external ingestion trigger."""
+    _assert_scheduler_token(request)
+
+    if not INGESTION_RUNTIME_SETTINGS["external_ingestion_enabled"]:
+        return {
+            "status": "skipped",
+            "reason": "external_ingestion_disabled",
+            "ingestion": get_ingestion_snapshot(),
+        }
+
+    result = await ingest_from_web()
+    return {
+        "status": "success",
+        "trigger": "scheduler",
+        "ingestion": result,
+    }
+
+@app.get("/api/admin/ingest-live-status")
+async def admin_ingest_live_status():
+    """Get status of automatic live web ingestion cache"""
+    return get_ingestion_snapshot()
 
 @app.get("/api/admin/ingestion-status")
 async def admin_ingest_status():
@@ -459,12 +628,37 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app):
     """Manage app startup and shutdown"""
+    auto_ingest_task = None
+    stop_event = asyncio.Event()
+
+    async def auto_ingest_loop():
+        interval_minutes = int(os.getenv("AUTO_INGEST_INTERVAL_MINUTES", "15"))
+        logger.info(f"Auto-ingestion loop started (every {interval_minutes} minutes)")
+        while not stop_event.is_set():
+            try:
+                await ingest_from_web()
+            except Exception as e:
+                logger.error(f"Auto-ingestion loop error: {str(e)}")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_minutes * 60)
+            except asyncio.TimeoutError:
+                continue
+
     # Startup
     logger.info("NewsLensAI Backend starting up...")
     logger.info(f"Environment: {os.getenv('ENV', 'development')}")
     logger.info(f"Project: {os.getenv('GCP_PROJECT_ID', 'newslensai')}")
+    if INGESTION_RUNTIME_SETTINGS["auto_ingestion_enabled"]:
+        auto_ingest_task = asyncio.create_task(auto_ingest_loop())
     yield
     # Shutdown
+    stop_event.set()
+    if auto_ingest_task:
+        auto_ingest_task.cancel()
+        try:
+            await auto_ingest_task
+        except asyncio.CancelledError:
+            pass
     logger.info("NewsLensAI Backend shutting down...")
 
 # Update app with lifespan

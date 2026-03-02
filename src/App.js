@@ -4,6 +4,7 @@ import NewsDisplay from './components/NewsDisplay';
 import SentimentDashboard from './components/SentimentDashboard';
 import AdminPanel from './components/AdminPanel';
 import NewsLensAIAPI from './services/api';
+import { sendChatMessage } from './services/chatService';
 import GCP_CONFIG from './config/gcp';
 import './App.css';
 
@@ -69,15 +70,24 @@ function App() {
     }
   }, [activeTab]);
 
-  const handleSendMessage = async (query, sid) => {
+  const handleSendMessage = async ({ query, sessionId: sid, topic }) => {
     setIsLoading(true);
     try {
-      const response = await NewsLensAIAPI.sendChatMessage(sid, query);
+      const response = await sendChatMessage({
+        sessionId: sid,
+        query,
+        topic,
+      });
       setIsLoading(false);
       return response;
     } catch (error) {
       setIsLoading(false);
-      console.error('Error sending message:', error);
+      console.error('[NewsLensAI/UI]', {
+        scope: 'send_message',
+        code: error.code || 'chat_error',
+        message: error.message,
+        meta: error.meta || null,
+      });
       throw error;
     }
   };

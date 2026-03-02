@@ -14,6 +14,8 @@ from vertexai.language_models import TextEmbeddingModel, TextGenerationModel
 
 logger = logging.getLogger(__name__)
 
+NO_VERIFIED_INFO_MESSAGE = "I don't have verified information on this topic yet."
+
 # Initialize Vertex AI
 PROJECT_ID = os.getenv('GCP_PROJECT_ID', 'newslensai-mvp')
 REGION = 'asia-south1'
@@ -156,12 +158,14 @@ async def get_rag_response(
     """
     try:
         if not context_articles:
-            # Fallback if no articles found
+            # Mandatory fallback for missing verified context.
             return {
-                'answer': f"I'm searching for information about '{query}'. Please try again in a moment as I'm processing recent news about {region}.",
+                'summary': NO_VERIFIED_INFO_MESSAGE,
+                'answer': NO_VERIFIED_INFO_MESSAGE,
                 'sources': [],
                 'region': region,
-                'confidence': 0.0
+                'confidence': 'Low',
+                'last_updated': datetime.utcnow().isoformat()
             }
         
         # Build context from retrieved articles
@@ -173,10 +177,12 @@ async def get_rag_response(
             for article in context_articles[:5]  # Limit to top 5
         ])
         
-        # Prepare prompt with context injection
-        prompt = f"""You are NewsLensAI, a news intelligence assistant specializing in {region} news.
+        # Strict instruction to prevent hallucinations beyond retrieved context.
+        prompt = f"""System instruction:
+You must answer strictly using retrieved news context. If not found, say: I don't have verified information on this topic yet.
 
-Based on the following recent news articles, provide a detailed, citation-backed answer to the user's query.
+You are NewsLensAI, a news intelligence assistant specializing in {region} news.
+Use only facts present in the retrieved context below.
 
 --- START CONTEXT ---
 {context_text}
@@ -184,10 +190,11 @@ Based on the following recent news articles, provide a detailed, citation-backed
 
 User Query: {query}
 
-Please provide:
-1. A comprehensive answer based on the context
-2. Cite the sources you're using
-3. Mention publication dates and sources
+Response rules:
+1) Summarize only what is present in context
+2) Do not invent facts
+3) If context is insufficient, return exactly: I don't have verified information on this topic yet.
+4) Keep response concise and factual
 
 Answer:"""
         
@@ -195,31 +202,39 @@ Answer:"""
         model = get_gemini_model()
         if not model:
             logger.warning("Gemini model not available, returning context summary")
+            fallback_summary = context_articles[0].get('summary') or NO_VERIFIED_INFO_MESSAGE
             return {
-                'answer': f"Based on recent news: {context_articles[0].get('summary', 'Information found')}",
+                'summary': fallback_summary,
+                'answer': fallback_summary,
                 'sources': context_articles[:3],
                 'region': region,
-                'confidence': 0.5
+                'confidence': 'Medium',
+                'last_updated': datetime.utcnow().isoformat()
             }
         
         response = model.predict(
             prompt,
-            temperature=0.7,
-            max_output_tokens=1024,
+            temperature=0.2,
+            max_output_tokens=512,
             top_p=0.8,
             top_k=40
         )
-        
-        answer = response.text if response else "Unable to generate answer"
+
+        answer = response.text.strip() if response and response.text else NO_VERIFIED_INFO_MESSAGE
+        if not answer:
+            answer = NO_VERIFIED_INFO_MESSAGE
+
+        confidence = "High" if len(context_articles) >= 3 else "Medium"
         
         logger.info(f"✓ Generated RAG response for query: {query[:50]}...")
         
         return {
+            'summary': answer,
             'answer': answer,
             'sources': context_articles[:5],  # Return top sources
             'region': region,
-            'confidence': 0.9,
-            'timestamp': datetime.utcnow().isoformat()
+            'confidence': confidence,
+            'last_updated': datetime.utcnow().isoformat()
         }
         
     except Exception as e:
@@ -227,18 +242,23 @@ Answer:"""
         # Fallback response
         if context_articles:
             fallback = context_articles[0]
+            fallback_summary = fallback.get('summary', fallback.get('content', '')[:200]) or NO_VERIFIED_INFO_MESSAGE
             return {
-                'answer': f"Based on recent reporting: {fallback.get('summary', fallback.get('content', '')[:200])}",
+                'summary': fallback_summary,
+                'answer': fallback_summary,
                 'sources': context_articles[:2],
                 'region': region,
-                'confidence': 0.6
+                'confidence': 'Medium',
+                'last_updated': datetime.utcnow().isoformat()
             }
         else:
             return {
-                'answer': f"I'm working on retrieving information about your query: '{query}'. Please try again.",
+                'summary': NO_VERIFIED_INFO_MESSAGE,
+                'answer': NO_VERIFIED_INFO_MESSAGE,
                 'sources': [],
                 'region': region,
-                'confidence': 0.0
+                'confidence': 'Low',
+                'last_updated': datetime.utcnow().isoformat()
             }
 
 
@@ -268,9 +288,12 @@ async def rag_pipeline(
         if not available_articles:
             logger.warning("No articles available for RAG search")
             return {
-                'answer': "No articles available at the moment. Please check the News section.",
+                'summary': NO_VERIFIED_INFO_MESSAGE,
+                'answer': NO_VERIFIED_INFO_MESSAGE,
                 'sources': [],
-                'region': region
+                'region': region,
+                'confidence': 'Low',
+                'last_updated': datetime.utcnow().isoformat()
             }
         
         similar_articles = await similarity_search(query, available_articles, top_k=5)
@@ -283,7 +306,10 @@ async def rag_pipeline(
     except Exception as e:
         logger.error(f"RAG pipeline error: {str(e)}", exc_info=True)
         return {
+            'summary': f"Error processing your query. Please try again: {str(e)}",
             'answer': f"Error processing your query. Please try again: {str(e)}",
             'sources': [],
-            'region': region
+            'region': region,
+            'confidence': 'Low',
+            'last_updated': datetime.utcnow().isoformat()
         }

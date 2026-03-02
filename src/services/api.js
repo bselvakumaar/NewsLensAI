@@ -1,41 +1,18 @@
-// API Service for NewsLensAI Backend Integration
-// This service handles all communication with the FastAPI backend running on Google Cloud Run
+import { request } from './httpClient';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
+function logApiError(scope, error, extra = {}) {
+  console.error('[NewsLensAI/API]', {
+    scope,
+    code: error.code || 'unknown_error',
+    message: error.message,
+    meta: error.meta || null,
+    ...extra,
+  });
+}
+
 class NewsLensAIAPI {
-  // Chat endpoint - sends query and receives RAG-backed response
-  static async sendChatMessage(sessionId, query) {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Session-ID': sessionId || 'default',
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          query: query,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return {
-        answer: data.answer || '',
-        sources: data.sources || [],
-        region: data.region || 'Global',
-      };
-    } catch (error) {
-      console.error('Chat API Error:', error);
-      throw error;
-    }
-  }
-
-  // Fetch latest news with optional filters
   static async getNews(filters = {}) {
     try {
       const queryParams = new URLSearchParams();
@@ -43,29 +20,17 @@ class NewsLensAIAPI {
       if (filters.topic) queryParams.append('topic', filters.topic);
       if (filters.limit) queryParams.append('limit', filters.limit);
 
-      const response = await fetch(
-        `${API_BASE_URL}/api/news?${queryParams.toString()}`,
-        {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        }
-      );
+      const data = await request(`/api/news?${queryParams.toString()}`, {
+        baseUrl: API_BASE_URL,
+      });
 
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status}`);
-      }
-
-      const data = await response.json();
       return data.articles || [];
     } catch (error) {
-      console.error('News API Error:', error);
+      logApiError('getNews', error, { filters });
       return [];
     }
   }
 
-  // Get sentiment analysis for specific entity or general trends
   static async getSentiment(filters = {}) {
     try {
       const queryParams = new URLSearchParams();
@@ -73,83 +38,53 @@ class NewsLensAIAPI {
       if (filters.region) queryParams.append('region', filters.region);
       if (filters.days) queryParams.append('days', filters.days);
 
-      const response = await fetch(
-        `${API_BASE_URL}/api/sentiment?${queryParams.toString()}`,
-        {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        }
-      );
+      const data = await request(`/api/sentiment?${queryParams.toString()}`, {
+        baseUrl: API_BASE_URL,
+      });
 
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status}`);
-      }
-
-      const data = await response.json();
       return data.sentiments || [];
     } catch (error) {
-      console.error('Sentiment API Error:', error);
+      logApiError('getSentiment', error, { filters });
       return [];
     }
   }
 
-  // Create new session
   static async createSession(userId = null) {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/sessions`, {
+      const data = await request('/api/sessions', {
+        baseUrl: API_BASE_URL,
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          user_id: userId,
-        }),
+        body: JSON.stringify({ user_id: userId }),
       });
-
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status}`);
-      }
-
-      const data = await response.json();
       return data.session_id;
     } catch (error) {
-      console.error('Session API Error:', error);
+      logApiError('createSession', error, { userId });
       return null;
     }
   }
 
-  // Get admin stats (development only)
   static async getAdminStats() {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/admin/stats`, {
-        method: 'GET',
+      return await request('/api/admin/stats', {
+        baseUrl: API_BASE_URL,
         headers: {
           'X-Admin-Token': process.env.REACT_APP_ADMIN_TOKEN || '',
         },
       });
-
-      if (!response.ok) {
-        throw new Error(`API Error: ${response.status}`);
-      }
-
-      return await response.json();
     } catch (error) {
-      console.error('Admin Stats Error:', error);
+      logApiError('getAdminStats', error);
       return null;
     }
   }
 
-  // Health check
   static async healthCheck() {
     try {
-      const response = await fetch(`${API_BASE_URL}/health`, {
-        method: 'GET',
+      await request('/health', {
+        baseUrl: API_BASE_URL,
       });
-      return response.ok;
+      return true;
     } catch (error) {
-      console.error('Health Check Error:', error);
+      logApiError('healthCheck', error);
       return false;
     }
   }
