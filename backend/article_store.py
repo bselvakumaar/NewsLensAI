@@ -7,6 +7,8 @@ automatic web ingestion so chat/news endpoints can use fresher context.
 
 import asyncio
 import logging
+import re
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -22,23 +24,73 @@ _INGEST_META: Dict = {
     "sources": {},
     "last_run_status": "never",
     "last_error": None,
+    "progress": {
+        "state": "idle",
+        "run_id": None,
+        "current_stage": "idle",
+        "stages": ["fetching", "cleansing", "indexing", "completed"],
+        "completed_stages": [],
+        "percent": 0,
+        "total_batches": 0,
+        "processed_batches": 0,
+        "fetched_articles": 0,
+        "deduped_articles": 0,
+        "indexed_articles": 0,
+        "active_region": None,
+        "active_topic": None,
+        "started_at": None,
+        "updated_at": None,
+        "completed_at": None,
+    },
 }
 _LOCK = asyncio.Lock()
+_INGESTION_MUTEX = asyncio.Lock()
 
 TOPIC_MAP = {
     "Finance": "Business",
     "Tech": "Technology",
-    "World": "General",
 }
 
 DEFAULT_TOPICS = ["Politics", "Business", "Technology", "Sports", "General"]
 DEFAULT_REGIONS = ["India", "Global"]
+STOPWORDS = {
+    "the", "and", "for", "with", "this", "that", "what", "latest", "today",
+    "news", "headline", "headlines", "update", "updates", "india", "global",
+    "from", "about", "into", "over", "under", "your", "have", "has",
+}
+TOPIC_HINTS = {
+    "Technology": {"tech", "technology", "ai", "artificial", "software", "startup", "semiconductor"},
+    "Business": {"finance", "business", "economy", "economic", "market", "markets", "stock", "stocks", "trade"},
+    "Politics": {"politics", "political", "government", "policy", "parliament", "election", "budget"},
+    "Sports": {"sports", "sport", "cricket", "football", "ipl", "match", "olympic"},
+}
 
 
 def normalize_topic(topic: Optional[str]) -> Optional[str]:
     if not topic:
         return None
+    if topic in {"All", "World", "General"}:
+        return None
     return TOPIC_MAP.get(topic, topic)
+
+
+def _tokenize(text: Optional[str]) -> List[str]:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def infer_topic_from_query(query: Optional[str]) -> Optional[str]:
+    tokens = _tokenize(query)
+    if not tokens:
+        return None
+
+    best_topic = None
+    best_score = 0
+    for topic, hints in TOPIC_HINTS.items():
+        score = sum(1 for token in tokens if token in hints)
+        if score > best_score:
+            best_score = score
+            best_topic = topic
+    return best_topic if best_score > 0 else None
 
 
 def _article_key(article: Dict) -> str:
@@ -105,44 +157,116 @@ async def ingest_from_web(
     """Fetch fresh articles from web sources and replace cache."""
     global _ARTICLES, _LAST_INGEST_AT, _INGEST_META
 
-    regions = regions or DEFAULT_REGIONS
-    topics = topics or DEFAULT_TOPICS
+    async with _INGESTION_MUTEX:
+        regions = regions or DEFAULT_REGIONS
+        topics = topics or DEFAULT_TOPICS
+        run_id = str(uuid.uuid4())
+        started_at = datetime.utcnow().isoformat()
+        total_batches = len(regions) * len(topics)
 
-    try:
-        fetched: List[Dict] = []
-        source_counts: Dict[str, int] = {}
+        try:
+            fetched: List[Dict] = []
+            source_counts: Dict[str, int] = {}
 
-        for region in regions:
-            for topic in topics:
-                batch = await _fetch_for_region_topic(region, topic, limit_per_fetch)
-                fetched.extend(batch)
-                for article in batch:
-                    source_name = article.get("source", "Unknown")
-                    source_counts[source_name] = source_counts.get(source_name, 0) + 1
+            async with _LOCK:
+                _INGEST_META["last_run_status"] = "running"
+                _INGEST_META["last_error"] = None
+                _INGEST_META["progress"] = {
+                    "state": "running",
+                    "run_id": run_id,
+                    "current_stage": "fetching",
+                    "stages": ["fetching", "cleansing", "indexing", "completed"],
+                    "completed_stages": [],
+                    "percent": 5,
+                    "total_batches": total_batches,
+                    "processed_batches": 0,
+                    "fetched_articles": 0,
+                    "deduped_articles": 0,
+                    "indexed_articles": 0,
+                    "active_region": None,
+                    "active_topic": None,
+                    "started_at": started_at,
+                    "updated_at": started_at,
+                    "completed_at": None,
+                }
 
-        deduped = _dedupe_articles(fetched)
+            for region_index, region in enumerate(regions):
+                for topic_index, topic in enumerate(topics):
+                    batch = await _fetch_for_region_topic(region, topic, limit_per_fetch)
+                    fetched.extend(batch)
+                    for article in batch:
+                        source_name = article.get("source", "Unknown")
+                        source_counts[source_name] = source_counts.get(source_name, 0) + 1
 
-        # Newest-first where published_at is available.
-        deduped.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+                    processed_batches = (region_index * len(topics)) + topic_index + 1
+                    percent = 5 + int((processed_batches / max(total_batches, 1)) * 60)
+                    async with _LOCK:
+                        _INGEST_META["progress"].update({
+                            "current_stage": "fetching",
+                            "processed_batches": processed_batches,
+                            "fetched_articles": len(fetched),
+                            "active_region": region,
+                            "active_topic": topic,
+                            "percent": min(percent, 70),
+                            "updated_at": datetime.utcnow().isoformat(),
+                        })
 
-        async with _LOCK:
-            _ARTICLES = deduped
-            _LAST_INGEST_AT = datetime.utcnow()
-            _INGEST_META = {
-                "total_articles": len(deduped),
-                "sources": source_counts,
-                "last_run_status": "success",
-                "last_error": None,
-            }
+            async with _LOCK:
+                _INGEST_META["progress"].update({
+                    "current_stage": "cleansing",
+                    "completed_stages": ["fetching"],
+                    "percent": 78,
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
 
-        logger.info(f"Ingestion complete: {len(deduped)} deduped articles")
-        return get_ingestion_snapshot()
-    except Exception as exc:
-        logger.error(f"Ingestion failed: {str(exc)}", exc_info=True)
-        async with _LOCK:
-            _INGEST_META["last_run_status"] = "failed"
-            _INGEST_META["last_error"] = str(exc)
-        return get_ingestion_snapshot()
+            deduped = _dedupe_articles(fetched)
+            deduped.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+
+            async with _LOCK:
+                _INGEST_META["progress"].update({
+                    "current_stage": "indexing",
+                    "completed_stages": ["fetching", "cleansing"],
+                    "deduped_articles": len(deduped),
+                    "percent": 90,
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
+
+            indexed_articles = len(deduped)
+            completed_at = datetime.utcnow().isoformat()
+            async with _LOCK:
+                _ARTICLES = deduped
+                _LAST_INGEST_AT = datetime.utcnow()
+                _INGEST_META["total_articles"] = len(deduped)
+                _INGEST_META["sources"] = source_counts
+                _INGEST_META["last_run_status"] = "success"
+                _INGEST_META["last_error"] = None
+                _INGEST_META["progress"].update({
+                    "state": "success",
+                    "current_stage": "completed",
+                    "completed_stages": ["fetching", "cleansing", "indexing", "completed"],
+                    "percent": 100,
+                    "indexed_articles": indexed_articles,
+                    "active_region": None,
+                    "active_topic": None,
+                    "completed_at": completed_at,
+                    "updated_at": completed_at,
+                })
+
+            logger.info(f"Ingestion complete: {len(deduped)} deduped articles")
+            return get_ingestion_snapshot()
+        except Exception as exc:
+            logger.error(f"Ingestion failed: {str(exc)}", exc_info=True)
+            failed_at = datetime.utcnow().isoformat()
+            async with _LOCK:
+                _INGEST_META["last_run_status"] = "failed"
+                _INGEST_META["last_error"] = str(exc)
+                _INGEST_META["progress"].update({
+                    "state": "failed",
+                    "current_stage": "failed",
+                    "updated_at": failed_at,
+                    "completed_at": failed_at,
+                })
+            return get_ingestion_snapshot()
 
 
 def get_ingestion_snapshot() -> Dict:
@@ -165,13 +289,19 @@ def query_articles(
     query: Optional[str] = None,
 ) -> List[Dict]:
     normalized_topic = normalize_topic(topic)
-    words = [w for w in (query or "").lower().split() if len(w) > 2]
+    inferred_topic = infer_topic_from_query(query) if not normalized_topic else None
+    effective_topic = normalized_topic or inferred_topic
+    words = [
+        token
+        for token in _tokenize(query)
+        if len(token) > 2 and token not in STOPWORDS
+    ]
 
     filtered = []
     for article in _ARTICLES:
         if region and article.get("region") not in {region, "Global"}:
             continue
-        if normalized_topic and article.get("topic") != normalized_topic:
+        if effective_topic and article.get("topic") != effective_topic:
             continue
         filtered.append(article)
 
@@ -186,8 +316,10 @@ def query_articles(
             article.get("content", ""),
         ]).lower()
         score = sum(1 for w in words if w in text)
+        if effective_topic and article.get("topic") == effective_topic:
+            score += 2
         if score > 0:
-            scored.append((score, article))
+            scored.append((score, article.get("published_at", ""), article))
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return [article for _, article in scored[:limit]]
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [article for _, _, article in scored[:limit]]

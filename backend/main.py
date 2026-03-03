@@ -18,6 +18,7 @@ import logging
 from datetime import datetime
 import uuid
 import asyncio
+import re
 
 # News sources
 from news_sources import (
@@ -32,6 +33,7 @@ from rag import rag_pipeline
 from article_store import (
     get_ingestion_snapshot,
     ingest_from_web,
+    infer_topic_from_query,
     is_cache_stale,
     normalize_topic,
     query_articles,
@@ -57,6 +59,23 @@ INGESTION_RUNTIME_SETTINGS = {
     "external_ingestion_enabled": os.getenv("EXTERNAL_INGESTION_ENABLED", "true").lower() == "true",
     "auto_ingestion_enabled": os.getenv("AUTO_INGEST_ENABLED", "true").lower() == "true",
 }
+NEWS_KEYWORDS = {
+    "news", "india", "global", "politics", "policy", "election", "finance", "economy",
+    "market", "stock", "world", "international", "war", "diplomacy", "tech",
+    "technology", "ai", "sports", "cricket", "football", "headline", "breaking",
+    "trend", "today", "latest", "update", "government", "budget", "inflation",
+    "sensex", "nifty"
+}
+FALLBACK_SCOPE_MESSAGE = "NewsLensAI focuses only on India & Global News."
+
+
+def _is_out_of_scope_query(query: str) -> bool:
+    tokens = re.findall(r"[a-zA-Z0-9]+", (query or "").lower())
+    if not tokens:
+        return True
+    if "how" in tokens and "you" in tokens:
+        return True
+    return not any(token in NEWS_KEYWORDS for token in tokens)
 
 
 def _assert_scheduler_token(request: Request):
@@ -172,6 +191,16 @@ async def chat(request: ChatRequest):
         ChatResponse with answer and sources
     """
     try:
+        if _is_out_of_scope_query(request.query):
+            return ChatResponse(
+                summary=FALLBACK_SCOPE_MESSAGE,
+                answer=FALLBACK_SCOPE_MESSAGE,
+                sources=[],
+                region=request.region or "India",
+                confidence="Low",
+                last_updated=datetime.utcnow().isoformat()
+            )
+
         logger.info(
             f"Chat request - Session: {request.session_id}, Query: {request.query}, "
             f"Region: {request.region}, Topic: {request.topic}"
@@ -180,9 +209,11 @@ async def chat(request: ChatRequest):
         # Fetch available articles from live ingestion cache first.
         region = request.region or "India"
         normalized_topic = normalize_topic(request.topic)
+        inferred_topic = infer_topic_from_query(request.query)
+        effective_topic = inferred_topic or normalized_topic
         available_articles = query_articles(
             region=region,
-            topic=normalized_topic,
+            topic=effective_topic,
             limit=80,
             query=request.query,
         )
@@ -192,7 +223,7 @@ async def chat(request: ChatRequest):
             await ingest_from_web()
             available_articles = query_articles(
                 region=region,
-                topic=normalized_topic,
+                topic=effective_topic,
                 limit=80,
                 query=request.query,
             )
@@ -202,20 +233,20 @@ async def chat(request: ChatRequest):
             try:
                 available_articles = await fetch_from_rss(
                     region=region,
-                    topic=normalized_topic,
+                    topic=effective_topic,
                     limit=20
                 )
                 if not available_articles:
                     available_articles = get_test_articles(
                         region=region,
-                        topic=normalized_topic,
+                        topic=effective_topic,
                         limit=20
                     )
             except Exception as e:
                 logger.warning(f"Failed to fetch direct fallback articles: {str(e)}")
                 available_articles = get_test_articles(
                     region=region,
-                    topic=normalized_topic,
+                    topic=effective_topic,
                     limit=20
                 )
         

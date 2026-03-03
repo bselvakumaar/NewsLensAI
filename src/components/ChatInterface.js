@@ -3,7 +3,7 @@ import useDebouncedValue from '../hooks/useDebouncedValue';
 import { FALLBACK_SCOPE_MESSAGE, getGuardrailError } from '../utils/guardrails';
 import '../styles/ChatInterface.css';
 
-const TOPICS = ['Politics', 'Finance', 'World', 'Tech', 'Sports'];
+const TOPICS = ['All', 'Politics', 'Finance', 'World', 'Tech', 'Sports'];
 const TRENDING_TODAY = [
   'What are the top India political headlines today?',
   'How did global markets close today?',
@@ -31,7 +31,7 @@ function nextId(prefix) {
 const ChatInterface = ({ onSendMessage, isLoading, sessionId }) => {
   const [messages, setMessages] = useState([INITIAL_BOT_MESSAGE]);
   const [inputValue, setInputValue] = useState('');
-  const [activeTopic, setActiveTopic] = useState('Politics');
+  const [activeTopic, setActiveTopic] = useState('All');
   const [lastRequest, setLastRequest] = useState(null);
   const messagesEndRef = useRef(null);
   const debouncedInput = useDebouncedValue(inputValue, 250);
@@ -41,8 +41,8 @@ const ChatInterface = ({ onSendMessage, isLoading, sessionId }) => {
   }, [messages, isLoading]);
 
   const liveGuardrailError = useMemo(
-    () => getGuardrailError(debouncedInput),
-    [debouncedInput]
+    () => getGuardrailError(debouncedInput, activeTopic),
+    [debouncedInput, activeTopic]
   );
 
   const upsertBotMessage = (message) => {
@@ -57,7 +57,7 @@ const ChatInterface = ({ onSendMessage, isLoading, sessionId }) => {
 
   const sendQuery = async (query, topic) => {
     const normalizedQuery = query.trim();
-    const guardrailError = getGuardrailError(normalizedQuery);
+    const guardrailError = getGuardrailError(normalizedQuery, topic);
 
     if (guardrailError) {
       upsertBotMessage({
@@ -297,7 +297,7 @@ const ChatInterface = ({ onSendMessage, isLoading, sessionId }) => {
             </button>
           ))}
         </div>
-        {liveGuardrailError && (
+        {inputValue.trim().length > 0 && liveGuardrailError && (
           <p className="guardrail-hint" role="alert">
             {liveGuardrailError}
           </p>
